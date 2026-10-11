@@ -47,7 +47,7 @@ Found 2 error(s), 1 warning(s) in 1 file(s)
 
 </details>
 
-[27 rules](#diagnostic-rules) cover what the schema alone can tell you: missing tables and columns, type mismatches, NOT NULL columns left out, `ON CONFLICT` targets with no unique key, `GROUP BY` errors, values out of range, and warnings for queries that are valid but probably not what you meant. Anything sqlsift can't work out is left unreported: on 16 open-source apps (687 files) it reports zero false positives.
+[28 rules](#diagnostic-rules) cover what the schema alone can tell you: missing tables and columns, type mismatches, NOT NULL columns left out, `ON CONFLICT` targets with no unique key, `GROUP BY` errors, values out of range, and warnings for queries that are valid but probably not what you meant. Anything sqlsift can't work out is left unreported: on 16 open-source apps (687 files) it reports zero false positives.
 
 > **Status:** early development (alpha). Diagnostics may change between versions. Feedback, bug reports and real-world SQL that sqlsift gets wrong are very welcome — please [open an issue](https://github.com/yukikotani231/sqlsift/issues).
 
@@ -208,8 +208,9 @@ The action is also listed on the [GitHub Marketplace](https://github.com/marketp
 | [E0025](https://sqlsift.dev/docs/rules/E0025.html) | insert-without-columns | INSERT without a column list |
 | [E0026](https://sqlsift.dev/docs/rules/E0026.html) | select-star | SELECT * in a query's result columns |
 | [E0027](https://sqlsift.dev/docs/rules/E0027.html) | wrong-argument-type | Function or operator given an argument type it doesn't take |
+| [E0028](https://sqlsift.dev/docs/rules/E0028.html) | limit-without-order-by | LIMIT or OFFSET without ORDER BY |
 
-E0001-E0017 and E0027 report queries the database rejects and are errors by default; E0018-E0023 (`suspicious`) report valid queries that almost certainly don't do what was meant and are warnings by default; E0024-E0026 (`restriction`) are off until enabled (`-W restriction`).
+E0001-E0017 and E0027 report queries the database rejects and are errors by default; E0018-E0023 (`suspicious`) report valid queries that almost certainly don't do what was meant and are warnings by default; E0024-E0026 and E0028 (`restriction`) are off until enabled (`-W restriction`).
 
 Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sqlsift.toml`) or per run (`-A` / `-W` / `-D`), and silenced for a line or a file with `-- sqlsift:disable` / `-- sqlsift:disable-file` comments, or for a whole existing backlog with a baseline (`--write-baseline` / `--baseline`). See [Rules and levels](https://sqlsift.dev/docs/guide/rules.html) and [Suppressing diagnostics](https://sqlsift.dev/docs/guide/suppression.html).
 
@@ -237,7 +238,7 @@ The [user guide](https://sqlsift.dev/docs/) covers:
 - [x] Baseline of known diagnostics (`--write-baseline`, `baseline` in `sqlsift.toml`)
 - [x] SQL embedded in application code (sqlc, aiosql and HugSQL query names and parameters, TypeScript tagged templates)
 - [x] `sqlsift init`, example projects per stack, and a GitHub Action that reports only what a pull request introduces
-- [x] 27 rules, including `suspicious` warnings and opt-in `restriction` rules
+- [x] 28 rules, including `suspicious` warnings and opt-in `restriction` rules
 - [x] Snowflake, BigQuery, Redshift and Databricks dialects and dbt `catalog.json` (alpha)
 
 #### Planned

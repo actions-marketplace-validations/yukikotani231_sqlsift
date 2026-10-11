@@ -55,4 +55,5 @@ CREATE TABLE coupons (
 | [E0025](E0025.md) | `insert-without-columns` | INSERT without a column list |
 | [E0026](E0026.md) | `select-star` | SELECT * in a query's result columns |
 | [E0027](E0027.md) | `wrong-argument-type` | Function or operator given an argument type it doesn't take |
+| [E0028](E0028.md) | `limit-without-order-by` | LIMIT or OFFSET without ORDER BY |
 | [E1000](E1000.md) | `parse-error` | SQL could not be parsed |

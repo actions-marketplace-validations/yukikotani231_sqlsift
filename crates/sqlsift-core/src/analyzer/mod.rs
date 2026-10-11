@@ -326,6 +326,7 @@ impl<'a> Analyzer<'a> {
                 DiagnosticKind::UnfilteredWrite,
                 DiagnosticKind::InsertWithoutColumns,
                 DiagnosticKind::SelectStar,
+                DiagnosticKind::LimitWithoutOrderBy,
             ]
             .into_iter()
             .any(|kind| self.rules.level(kind) != crate::rules::RuleLevel::Off);

@@ -34,6 +34,7 @@ E0024  unfiltered-write          restriction  off      UPDATE or DELETE without 
 E0025  insert-without-columns    restriction  off      INSERT without a column list
 E0026  select-star               restriction  off      SELECT * in a query's result columns
 E0027  wrong-argument-type       correctness  error    Function or operator given an argument type it doesn't take
+E0028  limit-without-order-by    restriction  off      LIMIT or OFFSET without ORDER BY
 E1000  parse-error               correctness  error    SQL could not be parsed
 ```
 

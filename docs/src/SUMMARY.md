@@ -56,6 +56,7 @@
   - [E0025 insert-without-columns](rules/E0025.md)
   - [E0026 select-star](rules/E0026.md)
   - [E0027 wrong-argument-type](rules/E0027.md)
+  - [E0028 limit-without-order-by](rules/E0028.md)
   - [E1000 parse-error](rules/E1000.md)
 
 ---

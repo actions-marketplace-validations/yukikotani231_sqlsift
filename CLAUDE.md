@@ -256,6 +256,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - **E0024**-**E0026** (restriction, off by default): UPDATE/DELETE without WHERE, INSERT without column list, SELECT * (`analyzer/restriction.rs`; only run when enabled)
 - **E0017**: Value out of range (literal too long / out of range for the column in INSERT VALUES / UPDATE SET; PostgreSQL, Redshift, MySQL)
 - **E0027**: Wrong argument type (built-in function or LIKE with an argument type PostgreSQL has no version for: `sum(text)`, `lower(integer)`, `int LIKE`; skipped for names the schema defines; `analyzer/signatures.rs`)
+- **E0028** (restriction, off by default): LIMIT / OFFSET / FETCH FIRST without ORDER BY, in subqueries and CTEs too, except the query of an EXISTS (`analyzer/restriction.rs`)
 - **E1000**: Generic parse error
 
 ## Release Process
