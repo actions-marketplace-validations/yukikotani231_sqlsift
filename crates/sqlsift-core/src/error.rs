@@ -158,7 +158,7 @@ pub enum DiagnosticKind {
     TypeMismatch,
     /// E0004: Potential NOT NULL violation
     PotentialNullViolation,
-    /// E0005: Column count mismatch in INSERT
+    /// E0005: Column count mismatch (INSERT, column aliases, subqueries, rows)
     ColumnCountMismatch,
     /// E0006: Ambiguous column reference
     AmbiguousColumn,
@@ -166,6 +166,22 @@ pub enum DiagnosticKind {
     JoinTypeMismatch,
     /// E0008: INSERT omits a NOT NULL column that has no default
     MissingRequiredColumn,
+    /// E0009: A table alias or CTE name given twice in one query block
+    DuplicateName,
+    /// E0010: A column given twice in an INSERT column list or UPDATE SET
+    DuplicateTargetColumn,
+    /// E0011: ORDER BY / GROUP BY position past the end of the select list
+    PositionOutOfRange,
+    /// E0012: Aggregate or window function in a clause that doesn't allow it
+    MisplacedAggregate,
+    /// E0013: A value given for a generated column by INSERT or UPDATE
+    GeneratedColumnWrite,
+    /// E0014: ON CONFLICT target that matches no primary key or unique constraint
+    UnmatchedConflictTarget,
+    /// E0015: ORDER BY of SELECT DISTINCT on something not selected
+    DistinctOrderBy,
+    /// E0016: Column neither grouped nor aggregated in an aggregate query
+    GroupingError,
     /// Parse error
     ParseError,
 }

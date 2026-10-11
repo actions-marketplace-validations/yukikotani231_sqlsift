@@ -58,10 +58,11 @@ sqlsift/
 4. **Resolver** (`analyzer/resolver.rs`): Walks each statement once: resolves table, view, CTE and column references and reports each query block's output columns with their types
 5. **Scope** (`analyzer/scope.rs`): Stack of query blocks (relations, CTEs, USING columns) shared by name resolution and type inference; encodes SQL visibility rules (correlation, non-LATERAL FROM subqueries, CTE scoping)
 6. **Type checks** (`analyzer/type_check.rs`): Expression type inference and E0003/E0004/E0007 checks, implemented on `Resolver`
-7. **SqlType** (`types/mod.rs`): Internal SQL type representation with compatibility checking
-8. **Config** (`config.rs`): Configuration file loader with hierarchical merging (file < CLI args)
-9. **LSP Backend** (`sqlsift-lsp/server.rs`): tower-lsp LanguageServer implementation with real-time diagnostics
-10. **ServerState** (`sqlsift-lsp/state.rs`): LSP server state management (catalog, config, open documents)
+7. **Structural checks** (`analyzer/structure.rs`): E0009-E0015 (duplicate names and target columns, positions, misplaced aggregates, generated columns, ON CONFLICT targets, DISTINCT ORDER BY) and the E0005 checks of column alias lists and subquery shapes; `analyzer/grouping.rs` has E0016, implemented on `Resolver`
+8. **SqlType** (`types/mod.rs`): Internal SQL type representation with compatibility checking
+9. **Config** (`config.rs`): Configuration file loader with hierarchical merging (file < CLI args)
+10. **LSP Backend** (`sqlsift-lsp/server.rs`): tower-lsp LanguageServer implementation with real-time diagnostics
+11. **ServerState** (`sqlsift-lsp/state.rs`): LSP server state management (catalog, config, open documents)
 
 ### Data Flow
 
@@ -110,7 +111,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 
 1. Add variant to `DiagnosticKind` in `error.rs` and its entry (code, name, category, summary) to `RULES` in `rules.rs`, in the same position (the registry is indexed by the variant). Give it the next free `E00xx` code: the `E` is a prefix, not a severity, and a code is never changed or reused once released
 2. Pick the category by how sure the rule is: `correctness` (definitely wrong, default error), `suspicious` (likely wrong, default warn), `pedantic` / `style` / `restriction` (opt-in)
-3. Implement detection logic in `analyzer/resolver.rs` (names) or `analyzer/type_check.rs` (types); look names up through `Scope`, never by walking FROM clauses yourself
+3. Implement detection logic in `analyzer/resolver.rs` (names), `analyzer/type_check.rs` (types) or `analyzer/structure.rs` (query shape); look names up through `Scope`, never by walking FROM clauses yourself
 4. Add test cases (`crates/sqlsift-core/tests/`), the rule to the README rule table and a rule page in `docs/src/rules/` (user guide, mdBook)
 
 ### Adding SQL Type Support
@@ -236,10 +237,18 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - **E0002**: Column not found
 - **E0003**: Type mismatch (comparisons, arithmetic, INSERT VALUES, UPDATE SET)
 - **E0004**: Potential NOT NULL violation (explicit NULL assigned to a NOT NULL column)
-- **E0005**: Column count mismatch in INSERT
+- **E0005**: Column count mismatch (INSERT, column alias lists, subqueries, row comparisons)
 - **E0006**: Ambiguous column reference
 - **E0007**: JOIN type mismatch (JOIN condition type incompatibility)
 - **E0008**: Missing required column (INSERT omits a NOT NULL column without DEFAULT / identity / serial / AUTO_INCREMENT)
+- **E0009**: Duplicate name (table alias or CTE name given twice in one query block)
+- **E0010**: Duplicate target column (INSERT column list, UPDATE SET)
+- **E0011**: ORDER BY / GROUP BY position out of range
+- **E0012**: Misplaced aggregate or window function (WHERE, JOIN ON, GROUP BY, nested aggregates, ...)
+- **E0013**: Generated column write (INSERT/UPDATE value for a generated or GENERATED ALWAYS identity column)
+- **E0014**: ON CONFLICT target matches no primary key / unique constraint / unique index
+- **E0015**: SELECT DISTINCT ordered by an unselected column (and DISTINCT ON vs ORDER BY)
+- **E0016**: Grouping error (column neither grouped nor aggregated; PostgreSQL/Redshift, with primary-key functional dependency)
 - **E1000**: Generic parse error
 
 ## Release Process

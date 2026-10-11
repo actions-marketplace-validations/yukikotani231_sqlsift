@@ -26,6 +26,7 @@ use super::scope::{
     lookup_ignore_case, split_column_ref, Column, ColumnLookup, ColumnMatch, Cte, ExpressionType,
     Relation, RelationKind, Scope, UNNAMED_COLUMN,
 };
+use super::structure::Clause;
 
 /// Resolves names and checks types in SQL statements
 pub(super) struct Resolver<'a> {
@@ -45,6 +46,13 @@ pub(super) struct Resolver<'a> {
     variables: Vec<String>,
     /// Whether a name at this location is made from a template tag (`AS {{ c }}`)
     templated_name: Option<&'a dyn Fn(&Span) -> bool>,
+    /// Relation names the FROM clause being resolved gives twice (E0009)
+    pub(super) duplicate_names: Vec<String>,
+    /// The statement has template tags, which may expand to columns or clauses
+    pub(super) templated_statement: bool,
+    /// Subqueries compared with or assigned to a row, by address (they may return
+    /// several columns)
+    pub(super) row_subqueries: Vec<usize>,
 }
 
 impl<'a> Resolver<'a> {
@@ -58,6 +66,9 @@ impl<'a> Resolver<'a> {
             unaliased_subqueries: 0,
             variables: Vec::new(),
             templated_name: None,
+            duplicate_names: Vec::new(),
+            templated_statement: false,
+            row_subqueries: Vec::new(),
         }
     }
 
@@ -187,6 +198,8 @@ impl<'a> Resolver<'a> {
             return None;
         };
 
+        self.check_duplicate_insert_columns(&insert.columns);
+
         // Check if specified columns exist
         for col_ident in &insert.columns {
             if !table_def.column_exists(&col_ident.value) {
@@ -205,8 +218,10 @@ impl<'a> Resolver<'a> {
             }
         }
 
+        // Without a column list, values are positional (SQLite skips generated columns)
+        let positional_columns = self.positional_columns(table_def);
         let expected_count = if insert.columns.is_empty() {
-            table_def.columns.len()
+            positional_columns.len()
         } else {
             insert.columns.len()
         };
@@ -235,7 +250,13 @@ impl<'a> Resolver<'a> {
                 .map(Vec::len)
                 .max()
                 .filter(|&n| n <= expected_count)
-                .map(|n| table_def.columns.keys().take(n).cloned().collect()),
+                .map(|n| {
+                    positional_columns
+                        .iter()
+                        .take(n)
+                        .map(|c| (*c).to_string())
+                        .collect()
+                }),
             _ => None,
         };
 
@@ -299,10 +320,13 @@ impl<'a> Resolver<'a> {
                 }
                 for expr in row {
                     self.expr(expr);
+                    self.check_aggregates_in(expr, Clause::Values);
                 }
             }
             self.check_insert_values(insert, table_def, rows);
+            self.check_generated_insert(insert, table_def, Some(rows));
         } else if let Some(selected) = &selected {
+            self.check_generated_insert(insert, table_def, None);
             if selected.len() != expected_count {
                 let mut diag = Diagnostic::error(
                     DiagnosticKind::ColumnCountMismatch,
@@ -418,6 +442,7 @@ impl<'a> Resolver<'a> {
                     for col in columns {
                         self.check_target_column(table_def, table_name, col);
                     }
+                    self.check_conflict_target(table_def, table_name, columns);
                 }
                 match &on_conflict.action {
                     OnConflictAction::DoNothing => return,
@@ -444,6 +469,7 @@ impl<'a> Resolver<'a> {
             }
             self.expr(&assignment.value);
         }
+        self.check_duplicate_assignments(assignments);
         self.check_assignments(table_def, assignments);
     }
 
@@ -526,17 +552,22 @@ impl<'a> Resolver<'a> {
                 }
                 AssignmentTarget::Tuple(_) => {
                     // Tuple assignment (col1, col2) = (val1, val2) - not commonly used
+                    self.allow_row_subquery(&assignment.value);
                 }
             }
             self.expr(&assignment.value);
+            self.check_aggregates_in(&assignment.value, Clause::UpdateSet);
         }
+        self.check_duplicate_assignments(assignments);
 
         if let Some(where_expr) = selection {
             self.expr(where_expr);
+            self.check_aggregates_in(where_expr, Clause::Where);
         }
 
         if let Some(def) = table_def {
             self.check_assignments(def, assignments);
+            self.check_generated_update(def, assignments);
         }
     }
 
@@ -570,6 +601,7 @@ impl<'a> Resolver<'a> {
 
         if let Some(where_expr) = &delete.selection {
             self.expr(where_expr);
+            self.check_aggregates_in(where_expr, Clause::Where);
         }
 
         self.returning(delete.returning.as_deref())
@@ -594,6 +626,7 @@ impl<'a> Resolver<'a> {
         recursive_cte: Option<(&str, &[String])>,
     ) -> Option<Vec<Column>> {
         self.scope.push(hides_parent);
+        self.check_duplicate_cte_names(query);
         if let Some(with) = &query.with {
             for cte in &with.cte_tables {
                 // Snowflake: a CTE is recursive when it references itself, with or
@@ -629,6 +662,9 @@ impl<'a> Resolver<'a> {
                 );
                 self.query_tail(query);
                 self.scope.pop();
+                if let Some(columns) = &columns {
+                    self.check_order_by_positions(query, columns.len(), None);
+                }
                 columns
             }
         };
@@ -671,6 +707,13 @@ impl<'a> Resolver<'a> {
                 .update_cte(&name, Relation::rename_columns(columns, &names));
         } else {
             let columns = self.query(&cte.query, false);
+            self.check_alias_count(
+                "WITH query",
+                &cte.alias.name,
+                columns.as_deref(),
+                names.len(),
+                true,
+            );
             self.scope.current().ctes.push(Cte {
                 name,
                 columns: Relation::rename_columns(columns, &names),
@@ -759,9 +802,12 @@ impl<'a> Resolver<'a> {
         self.scope.push(false);
 
         // FROM first: it builds the scope for every other clause
+        let duplicates = self.check_duplicate_relation_names(&select.from);
+        let outer_duplicates = std::mem::replace(&mut self.duplicate_names, duplicates);
         for table_with_joins in &select.from {
             self.table_with_joins(table_with_joins);
         }
+        self.duplicate_names = outer_duplicates;
 
         // Hive / Databricks `LATERAL VIEW [OUTER] explode(expr) alias AS c1, ...`: the
         // generator's argument sees the FROM clause, and its output is a relation with
@@ -815,6 +861,9 @@ impl<'a> Resolver<'a> {
         let select_span = Span::from_sqlparser(&select.select_token.0.span);
         for item in &select.projection {
             self.select_item(item, &select_span);
+            if let SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } = item {
+                self.check_nested_aggregates(expr);
+            }
             if let (true, SelectItem::ExprWithAlias { alias, .. }) = (lateral, item) {
                 self.scope
                     .current()
@@ -825,6 +874,7 @@ impl<'a> Resolver<'a> {
 
         if let Some(selection) = &select.selection {
             self.expr(selection);
+            self.check_aggregates_in(selection, Clause::Where);
         }
         if lateral {
             self.scope.current().select_aliases.clear();
@@ -835,11 +885,13 @@ impl<'a> Resolver<'a> {
             self.scope.current().select_aliases = aliases;
             for expr in exprs {
                 self.expr(expr);
+                self.check_aggregates_in(expr, Clause::GroupBy);
             }
             aliases = std::mem::take(&mut self.scope.current().select_aliases);
         }
 
         if let Some(having) = &select.having {
+            self.check_aggregates_in(having, Clause::Having);
             // Every dialect but PostgreSQL also resolves output column aliases in HAVING
             if self.dialect.aliases_in_having() {
                 self.scope.current().select_aliases = aliases;
@@ -859,12 +911,20 @@ impl<'a> Resolver<'a> {
         }
 
         let columns = self.projection_columns(&select.projection);
+        if let Some(columns) = &columns {
+            self.check_group_by_positions(select, columns.len());
+        }
 
         if let Some(query) = query {
             self.scope.current().select_aliases = aliases;
             self.query_tail(query);
+            self.check_distinct_order_by(select, query);
+            if let Some(columns) = &columns {
+                self.check_order_by_positions(query, columns.len(), Some(select_span));
+            }
         }
 
+        self.check_grouping(select, query);
         self.scope.pop();
         columns
     }
@@ -1018,8 +1078,10 @@ impl<'a> Resolver<'a> {
     /// Resolve a FROM item with its joins, registering its relations in the current frame
     fn table_with_joins(&mut self, table: &TableWithJoins) {
         self.table_factor(&table.relation);
+        self.forget_duplicate_relations();
         for join in &table.joins {
             self.table_factor(&join.relation);
+            self.forget_duplicate_relations();
             self.join_constraint(&join.join_operator, &join.relation);
         }
     }
@@ -1036,7 +1098,10 @@ impl<'a> Resolver<'a> {
 
         let right_key = relation_key(relation);
         match constraint {
-            JoinConstraint::On(expr) => self.join_on(expr),
+            JoinConstraint::On(expr) => {
+                self.join_on(expr);
+                self.check_aggregates_in(expr, Clause::JoinOn);
+            }
             JoinConstraint::Using(columns) => {
                 // USING columns exist in both sides by definition and are merged
                 // into a single unqualified column, so only check they exist
@@ -1177,6 +1242,15 @@ impl<'a> Resolver<'a> {
                     // into column/alias errors
                     Relation::new(RelationKind::Opaque, table_name.to_string(), None)
                 };
+                if let Some(alias) = alias {
+                    self.check_alias_count(
+                        "Table",
+                        &alias.name,
+                        relation.columns.as_deref(),
+                        alias_columns.len(),
+                        false,
+                    );
+                }
                 relation.columns = Relation::rename_columns(relation.columns, &alias_columns);
                 if aliased {
                     // The alias hides the table name
@@ -1204,6 +1278,13 @@ impl<'a> Resolver<'a> {
                 let (key, columns) = if let Some(a) = alias {
                     let names: Vec<String> =
                         a.columns.iter().map(|c| c.name.value.clone()).collect();
+                    self.check_alias_count(
+                        "Subquery",
+                        &a.name,
+                        columns.as_deref(),
+                        names.len(),
+                        true,
+                    );
                     (
                         a.name.value.clone(),
                         Relation::rename_columns(columns, &names),
@@ -1443,6 +1524,7 @@ impl<'a> Resolver<'a> {
                 let mut leftmost = expr;
                 while let Expr::BinaryOp { left, op, right } = leftmost {
                     chain.push((&**left, op, &**right));
+                    self.note_row_comparison(left, right);
                     leftmost = left;
                 }
                 self.expr(leftmost);
@@ -1450,6 +1532,7 @@ impl<'a> Resolver<'a> {
                 let mut left_type = None;
                 for (left, op, right) in chain.into_iter().rev() {
                     self.expr(right);
+                    self.check_row_comparison(left, right);
                     left_type = self.check_binary_op(left, op, right, left_type);
                 }
             }
@@ -1517,10 +1600,12 @@ impl<'a> Resolver<'a> {
             Expr::InSubquery { expr, subquery, .. } => {
                 self.expr(expr);
                 let columns = self.subquery(subquery);
+                self.check_in_subquery_shape(expr, columns.as_ref().map(Vec::len));
                 self.check_in_subquery(expr, columns.as_deref());
             }
             Expr::Subquery(query) => {
                 self.subquery(query);
+                self.check_scalar_subquery(expr, query);
             }
             Expr::Exists { subquery, .. } => {
                 self.subquery(subquery);
@@ -1941,7 +2026,12 @@ impl<'a> Resolver<'a> {
 
     /// Whether the database supplies a value for `col` when an INSERT omits it
     fn column_has_implicit_value(&self, table: &TableDef, col: &ColumnDef) -> bool {
-        if col.nullable || col.default.is_some() || col.identity.is_some() || col.auto_increment {
+        if col.nullable
+            || col.default.is_some()
+            || col.identity.is_some()
+            || col.auto_increment
+            || col.generated
+        {
             return true;
         }
         // SQLite: a single-column INTEGER PRIMARY KEY is an alias for the rowid
