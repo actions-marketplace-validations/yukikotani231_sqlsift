@@ -145,7 +145,9 @@ impl<'a> Resolver<'a> {
                 if let Some(source) = &insert.source {
                     self.insert_source(source);
                 }
-            } else {
+            } else if !(self.dialect == SqlDialect::BigQuery
+                && self.bigquery_table_may_exist(&table_name))
+            {
                 let diag = self.table_not_found(&table_name, table_span);
                 self.diagnostics.push(diag);
             }
@@ -1014,6 +1016,10 @@ impl<'a> Resolver<'a> {
                     .is_none()
                     .then(|| self.scope.cte(self.catalog, &table_name.name))
                     .flatten();
+                // BigQuery: a wildcard table, or a table of a dataset the schema
+                // doesn't define
+                let may_exist = self.dialect == SqlDialect::BigQuery
+                    && self.bigquery_table_may_exist(&table_name);
                 let mut relation = if let Some(cte) = cte {
                     Relation::new(RelationKind::Cte, cte.name.clone(), cte.columns.clone())
                 } else if let Some(table) = Relation::table(self.catalog, &table_name) {
@@ -1021,7 +1027,7 @@ impl<'a> Resolver<'a> {
                 } else if let Some(view) = Relation::view(self.catalog, &table_name) {
                     view
                 } else {
-                    if !is_system_table(self.dialect, &table_name) {
+                    if !is_system_table(self.dialect, &table_name) && !may_exist {
                         let span = name.0.last().map(|id| Span::from_sqlparser(&id.span));
                         let diag = self.table_not_found(&table_name, span);
                         self.diagnostics.push(diag);
@@ -1074,6 +1080,12 @@ impl<'a> Resolver<'a> {
             TableFactor::TableFunction { alias, .. }
             | TableFactor::Function { alias, .. }
             | TableFactor::UNNEST { alias, .. } => {
+                // UNNEST(t.items) sees the FROM items before it
+                if let TableFactor::UNNEST { array_exprs, .. } = factor {
+                    for e in array_exprs {
+                        self.expr(e);
+                    }
+                }
                 // Table-valued functions (e.g., generate_series, unnest): columns are
                 // known only from an alias column list (or Snowflake's FLATTEN)
                 let columns = if self.dialect == SqlDialect::Snowflake {
@@ -1179,6 +1191,9 @@ impl<'a> Resolver<'a> {
     pub(super) fn expr(&mut self, expr: &Expr) {
         match expr {
             Expr::Identifier(ident) => self.column(None, ident),
+            Expr::CompoundIdentifier(idents) if self.dialect.struct_field_paths() => {
+                self.bigquery_path(idents);
+            }
             Expr::CompoundIdentifier(idents) => {
                 // [[database.]schema.]table.column
                 let parts = split_dotted_idents(idents);
@@ -1543,7 +1558,11 @@ impl<'a> Resolver<'a> {
     }
 
     /// Resolve a column reference, qualified by `[schema.]table` or not
-    fn column(&mut self, qualifier: Option<(Option<&Ident>, &Ident)>, column_ident: &Ident) {
+    pub(super) fn column(
+        &mut self,
+        qualifier: Option<(Option<&Ident>, &Ident)>,
+        column_ident: &Ident,
+    ) {
         let column_name = &column_ident.value;
         let column_span = Span::from_sqlparser(&column_ident.span);
 
@@ -1615,6 +1634,8 @@ impl<'a> Resolver<'a> {
                 let is_keyword = column_ident.quote_style.is_none()
                     && (column_name.eq_ignore_ascii_case("DEFAULT")
                         || is_date_part_keyword(column_name)
+                        || (self.dialect == SqlDialect::BigQuery
+                            && super::bigquery::is_date_part(column_name))
                         || column_name.starts_with('@'));
                 if is_alias || is_relation || is_keyword {
                     return;
