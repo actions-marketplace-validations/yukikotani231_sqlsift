@@ -338,6 +338,13 @@ pub const RULES: &[Rule] = &[
         summary: "Function or operator given an argument type it doesn't take",
     },
     Rule {
+        kind: DiagnosticKind::LimitWithoutOrderBy,
+        code: "E0028",
+        name: "limit-without-order-by",
+        category: RuleCategory::Restriction,
+        summary: "LIMIT or OFFSET without ORDER BY",
+    },
+    Rule {
         kind: DiagnosticKind::ParseError,
         code: "E1000",
         name: "parse-error",

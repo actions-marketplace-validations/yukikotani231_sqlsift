@@ -204,6 +204,8 @@ pub enum DiagnosticKind {
     SelectStar,
     /// E0027: A built-in function or operator given an argument type it doesn't take
     WrongArgumentType,
+    /// E0028: LIMIT / OFFSET / FETCH FIRST without ORDER BY
+    LimitWithoutOrderBy,
     /// Parse error
     ParseError,
 }

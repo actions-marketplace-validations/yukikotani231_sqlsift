@@ -5,13 +5,17 @@
 //!   a column list, which breaks (or silently shifts values) when a column is added
 //! - E0026 select-star: `SELECT *` / `t.*` in a statement's result, which changes
 //!   when a column is added
+//! - E0028 limit-without-order-by: `LIMIT` / `OFFSET` / `FETCH FIRST` without
+//!   `ORDER BY`, which returns whichever rows the database comes to first
+
+use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    Delete, FromTable, ObjectName, Query, SelectItem, SetExpr, Statement, TableFactor,
-    TableWithJoins,
+    Delete, Expr, FromTable, ObjectName, Query, SelectItem, SetExpr, Spanned, Statement,
+    TableFactor, TableWithJoins, Visit, Visitor,
 };
 
-use crate::ast_ext::{insert_table, name_last, ObjectNamePartExt};
+use crate::ast_ext::{insert_table, name_last, query_limit, query_offset, ObjectNamePartExt};
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 
 use super::resolver::Resolver;
@@ -55,6 +59,21 @@ impl Resolver<'_> {
             }
             Statement::Query(query) => self.check_select_star(query),
             _ => {}
+        }
+        self.check_unordered_limits(stmt);
+    }
+
+    /// E0028 for the queries of a statement, subqueries and CTEs too
+    fn check_unordered_limits(&mut self, stmt: &Statement) {
+        let mut unordered = UnorderedLimits::default();
+        let _ = stmt.visit(&mut unordered);
+        for (keyword, span) in unordered.found {
+            self.push_restriction(
+                DiagnosticKind::LimitWithoutOrderBy,
+                &format!("{keyword} without ORDER BY returns an arbitrary set of rows"),
+                "Add an ORDER BY clause that puts the rows in a fixed order",
+                (span.line > 0).then_some(span),
+            );
         }
     }
 
@@ -100,6 +119,54 @@ impl Resolver<'_> {
         diag.span = span;
         self.diagnostics.push(diag);
     }
+}
+
+/// Queries that limit their rows without ordering them: the limiting keyword and
+/// the location of its value
+#[derive(Default)]
+struct UnorderedLimits {
+    found: Vec<(&'static str, Span)>,
+    /// The next query is the one of an `EXISTS (...)`, whose rows don't matter
+    in_exists: bool,
+}
+
+impl Visitor for UnorderedLimits {
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+        self.in_exists = matches!(expr, Expr::Exists { .. });
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<()> {
+        if std::mem::take(&mut self.in_exists) {
+            // `EXISTS ((SELECT ...))`: the query in the parentheses is the EXISTS one
+            self.in_exists = matches!(query.body.as_ref(), SetExpr::Query(_));
+            return ControlFlow::Continue(());
+        }
+        let (keyword, span) = if is_ordered(query) {
+            return ControlFlow::Continue(());
+        } else if let Some(limit) = query_limit(query) {
+            ("LIMIT", limit.span())
+        } else if let Some(offset) = query_offset(query) {
+            ("OFFSET", offset.span())
+        } else if let Some(fetch) = &query.fetch {
+            // `FETCH FIRST ROW ONLY` has no value to point at
+            let value = fetch.quantity.as_ref().map(Spanned::span);
+            ("FETCH FIRST", value.unwrap_or_else(|| query.span()))
+        } else {
+            return ControlFlow::Continue(());
+        };
+        self.found.push((keyword, Span::from_sqlparser(&span)));
+        ControlFlow::Continue(())
+    }
+}
+
+/// Whether `query` has an `ORDER BY`, its own or that of the parenthesized query it
+/// limits: `(SELECT ... ORDER BY id) LIMIT 5`
+fn is_ordered(query: &Query) -> bool {
+    query.order_by.is_some()
+        || matches!(query.body.as_ref(), SetExpr::Query(inner) if is_ordered(inner))
 }
 
 fn table_span(tables: &[TableWithJoins]) -> Option<Span> {

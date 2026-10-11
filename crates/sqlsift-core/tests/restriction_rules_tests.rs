@@ -1,5 +1,6 @@
 //! Restriction rules (off by default): UPDATE/DELETE without WHERE (E0024),
-//! INSERT without a column list (E0025) and SELECT * (E0026).
+//! INSERT without a column list (E0025), SELECT * (E0026) and LIMIT / OFFSET
+//! without ORDER BY (E0028).
 
 use sqlsift_core::rules::{RuleConfig, RuleLevel};
 use sqlsift_core::schema::SchemaBuilder;
@@ -10,22 +11,28 @@ CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL, email TEXT);
 CREATE TABLE archived (id INT PRIMARY KEY, name TEXT NOT NULL, email TEXT);
 ";
 
-fn codes_with(rules: RuleConfig, sql: &str) -> Vec<&'static str> {
+fn diagnostics_with(rules: RuleConfig, sql: &str) -> Vec<sqlsift_core::Diagnostic> {
     let mut builder = SchemaBuilder::new();
     builder.parse(SCHEMA).expect("schema parses");
     let catalog = builder.build().0;
-    Analyzer::new(&catalog)
-        .with_rules(rules)
-        .analyze(sql)
+    Analyzer::new(&catalog).with_rules(rules).analyze(sql)
+}
+
+fn codes_with(rules: RuleConfig, sql: &str) -> Vec<&'static str> {
+    diagnostics_with(rules, sql)
         .iter()
         .map(sqlsift_core::Diagnostic::code)
         .collect()
 }
 
-fn codes(sql: &str) -> Vec<&'static str> {
+fn restriction_rules() -> RuleConfig {
     let mut rules = RuleConfig::default();
     rules.configure("restriction", RuleLevel::Warn).unwrap();
-    codes_with(rules, sql)
+    rules
+}
+
+fn codes(sql: &str) -> Vec<&'static str> {
+    codes_with(restriction_rules(), sql)
 }
 
 #[test]
@@ -35,6 +42,7 @@ fn off_by_default() {
         "DELETE FROM users",
         "INSERT INTO users VALUES (1, 'a', NULL)",
         "SELECT * FROM users",
+        "SELECT id FROM users LIMIT 10",
     ] {
         assert!(codes_with(RuleConfig::default(), sql).is_empty(), "{sql}");
     }
@@ -78,6 +86,60 @@ fn e0026_select_star() {
     )
     .is_empty());
     assert!(codes("SELECT count(*) FROM users").is_empty());
+}
+
+#[test]
+fn e0028_limit_without_order_by() {
+    for sql in [
+        "SELECT id FROM users LIMIT 20 OFFSET 40",
+        "SELECT id FROM users OFFSET 40",
+        "SELECT id FROM users FETCH FIRST 5 ROWS ONLY",
+        "SELECT id FROM (SELECT id FROM users LIMIT 5) s ORDER BY id",
+        "WITH s AS (SELECT id FROM users LIMIT 5) SELECT id FROM s ORDER BY id",
+        "SELECT id FROM users UNION ALL SELECT id FROM archived LIMIT 5",
+    ] {
+        assert_eq!(codes(sql), ["E0028"], "{sql}");
+    }
+    for sql in [
+        "SELECT id FROM users ORDER BY id LIMIT 20 OFFSET 40",
+        "SELECT id FROM users UNION ALL SELECT id FROM archived ORDER BY id LIMIT 5",
+        "(SELECT id FROM users ORDER BY id) LIMIT 5",
+        "SELECT id FROM users LIMIT ALL",
+        // Which rows an EXISTS subquery returns doesn't matter
+        "SELECT id FROM users u WHERE EXISTS (SELECT 1 FROM archived a WHERE a.id = u.id LIMIT 1)",
+        "SELECT id FROM users WHERE NOT EXISTS ((SELECT 1 FROM archived LIMIT 1))",
+    ] {
+        assert!(codes(sql).is_empty(), "{sql}");
+    }
+    // A subquery of the EXISTS query is a query of its own
+    assert_eq!(
+        codes(
+            "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM (SELECT id FROM archived LIMIT 5) a)"
+        ),
+        ["E0028"]
+    );
+}
+
+#[test]
+fn e0028_has_a_location() {
+    for (sql, keyword, column) in [
+        ("SELECT id FROM users\nLIMIT 20 OFFSET 40", "LIMIT", 7),
+        ("SELECT id FROM users\nOFFSET 40", "OFFSET", 8),
+        (
+            "SELECT 1;\nSELECT id FROM users FETCH FIRST ROW ONLY",
+            "FETCH FIRST",
+            1,
+        ),
+    ] {
+        let diagnostics = diagnostics_with(restriction_rules(), sql);
+        assert_eq!(diagnostics.len(), 1, "{sql}");
+        assert_eq!(
+            diagnostics[0].message,
+            format!("{keyword} without ORDER BY returns an arbitrary set of rows")
+        );
+        let span = diagnostics[0].span.expect("span");
+        assert_eq!((span.line, span.column), (2, column), "{sql}");
+    }
 }
 
 #[test]
