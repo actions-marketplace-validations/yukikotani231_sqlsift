@@ -24,6 +24,7 @@ use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
 
 use crate::args::{Args, Command, OutputFormat, SchemaFormat};
 use crate::config::{Config, RuleFlags};
+use crate::output::describe::FileDescription;
 use crate::output::schema::SchemaReport;
 use crate::output::{FileDiagnostics, OutputFormatter};
 
@@ -69,6 +70,9 @@ fn init_tracing(verbose: u8, quiet: bool) {
 /// (empty unless [`QueryOptions::references`])
 type AnalyzedFile = Result<(String, Vec<Diagnostic>, Vec<Reference>)>;
 
+/// A query file's contents and what was found in it
+type ProcessedFile<T> = Result<(String, T)>;
+
 /// The file argument that reads a query from stdin
 const STDIN_ARG: &str = "-";
 
@@ -104,7 +108,32 @@ fn analyze_files(
     stdin: Option<&str>,
     options: &QueryOptions,
 ) -> Vec<AnalyzedFile> {
-    let analyze_one = |i: usize, path: &PathBuf| -> AnalyzedFile {
+    process_files(files, stdin, options, |analyzer, name, content| {
+        let diagnostics = if is_component_file(name) {
+            analyzer.analyze_embedded_component(content, options.embedded_sql_tags)
+        } else if is_embedded_sql_file(name) {
+            analyzer.analyze_embedded(content, options.embedded_sql_tags)
+        } else {
+            analyzer.analyze(content)
+        };
+        (diagnostics, analyzer.references().to_vec())
+    })
+    .into_iter()
+    .map(|r| r.map(|(content, (diagnostics, references))| (content, diagnostics, references)))
+    .collect()
+}
+
+/// Read each query file and run `process` on it with an analyzer set up as
+/// `options` say (the file's name decides how its content is read), in parallel
+/// across the available cores. Results are returned in the same order as `files`.
+/// The file `-` is the query read from stdin, `stdin`.
+fn process_files<T: Send>(
+    files: &[PathBuf],
+    stdin: Option<&str>,
+    options: &QueryOptions,
+    process: impl Fn(&mut Analyzer, &Path, &str) -> T + Sync,
+) -> Vec<ProcessedFile<T>> {
+    let analyze_one = |i: usize, path: &PathBuf| -> ProcessedFile<T> {
         tracing::debug!(file = %path.display(), "Analyzing SQL file");
         let (content, name) = match stdin {
             Some(stdin) if is_stdin(path) => (
@@ -119,15 +148,8 @@ fn analyze_files(
         if options.references {
             analyzer = analyzer.with_references();
         }
-        let diagnostics = if is_component_file(name) {
-            analyzer.analyze_embedded_component(&content, options.embedded_sql_tags)
-        } else if is_embedded_sql_file(name) {
-            analyzer.analyze_embedded(&content, options.embedded_sql_tags)
-        } else {
-            analyzer.analyze(&content)
-        };
-        let references = analyzer.references().to_vec();
-        Ok((content, diagnostics, references))
+        let result = process(&mut analyzer, name, &content);
+        Ok((content, result))
     };
 
     let workers = std::thread::available_parallelism()
@@ -147,7 +169,7 @@ fn analyze_files(
 
     // Workers take the next unclaimed file until none are left
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let mut results: Vec<Option<AnalyzedFile>> = (0..files.len()).map(|_| None).collect();
+    let mut results: Vec<Option<ProcessedFile<T>>> = (0..files.len()).map(|_| None).collect();
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
             .map(|_| {
@@ -1080,6 +1102,115 @@ fn run(args: Args) -> Result<bool> {
             };
             print!("{}", report.render(format));
             Ok(false)
+        }
+
+        Command::Describe {
+            files,
+            schema,
+            schema_dir,
+            ignore,
+            config: config_path,
+            dialect,
+            templating,
+            dbt_catalog,
+            format,
+        } => {
+            let config = load_config(config_path.as_deref())?.merge_with_args(
+                &schema,
+                schema_dir.as_deref(),
+                &files,
+                &ignore,
+                None,
+                dialect.as_deref(),
+                templating.as_deref(),
+                dbt_catalog.as_deref(),
+                None,
+                None,
+            );
+            // Rule levels decide which diagnostics are errors
+            let rules = config.rule_config(&RuleFlags {
+                allow: &[],
+                warn: &[],
+                deny: &[],
+            })?;
+            let dialect = config_dialect(&config)?;
+            let templating = config.templating()?;
+
+            let mut dbt_projects = dbt::DbtProjects::default();
+            let dbt_catalogs = dbt_catalog_files(&config, templating, &mut dbt_projects)?;
+            let schema_files = schema_files(&config, !dbt_catalogs.is_empty())?;
+            let mut catalog = match build_catalog(&schema_files, dialect, true)? {
+                Ok(catalog) => catalog,
+                Err(failed) => {
+                    OutputFormatter::new(OutputFormat::Human).print(&[failed]);
+                    return Ok(true);
+                }
+            };
+            load_dbt_catalogs(&mut catalog, &dbt_catalogs)?;
+            load_dbt_vars(&mut catalog, &config, templating, &mut dbt_projects);
+
+            let QueryFiles {
+                files: query_files,
+                templating: file_templating,
+                ..
+            } = collect_query_files(
+                &config,
+                templating,
+                &mut dbt_projects,
+                None,
+                "Use positional arguments or configure in sqlsift.toml",
+            )?;
+            if query_files.iter().any(|p| is_stdin(p)) {
+                miette::bail!("describe doesn't read queries from stdin ('-')");
+            }
+
+            let embedded_sql_tags = config.embedded_sql_tags();
+            let options = QueryOptions {
+                catalog: &catalog,
+                dialect,
+                templating: &file_templating,
+                rules: &rules,
+                embedded_sql_tags: &embedded_sql_tags,
+                stdin_filename: None,
+                references: false,
+            };
+            let described =
+                process_files(&query_files, None, &options, |analyzer, name, content| {
+                    if is_component_file(name) {
+                        analyzer.describe_embedded_component(content, options.embedded_sql_tags)
+                    } else if is_embedded_sql_file(name) {
+                        analyzer.describe_embedded(content, options.embedded_sql_tags)
+                    } else {
+                        analyzer.describe(content)
+                    }
+                });
+
+            let mut results = Vec::new();
+            let mut errors = 0;
+            let mut files_with_errors = 0;
+            for (path, described) in query_files.iter().zip(described) {
+                let (_, description) = described?;
+                let file_errors = description
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.severity == sqlsift_core::Severity::Error)
+                    .count();
+                errors += file_errors;
+                files_with_errors += usize::from(file_errors > 0);
+                results.push(FileDescription {
+                    file: path.display().to_string(),
+                    queries: description.queries,
+                });
+            }
+            print!("{}", output::describe::render(&results, dialect, format));
+
+            // Columns of queries with errors may be unknown or wrong
+            if errors > 0 {
+                eprintln!(
+                    "Found {errors} error(s) in {files_with_errors} file(s); run `sqlsift check` to see them"
+                );
+            }
+            Ok(errors > 0)
         }
 
         Command::Parse { file } => {
