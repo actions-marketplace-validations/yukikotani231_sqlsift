@@ -166,7 +166,8 @@ impl<'a> Resolver<'a> {
                     from,
                     update.selection.as_ref(),
                 );
-                let columns = self.returning(update.returning.as_deref());
+                let target = relation_key(&update.table.relation);
+                let columns = self.returning(update.returning.as_deref(), target.as_deref());
                 self.scope.pop();
                 columns
             }
@@ -422,7 +423,10 @@ impl<'a> Resolver<'a> {
             .table_alias
             .as_ref()
             .map_or_else(|| table_name.name.clone(), |a| a.alias.value.clone());
-        self.scope.current().relations.insert(key, target.clone());
+        self.scope
+            .current()
+            .relations
+            .insert(key.clone(), target.clone());
         if let Some(on) = &insert.on {
             // MySQL row alias: INSERT ... VALUES (...) AS new ON DUPLICATE KEY UPDATE c = new.c
             let row_alias = insert
@@ -431,10 +435,42 @@ impl<'a> Resolver<'a> {
                 .and_then(|a| a.row_alias.0.last())
                 .map(|a| a.ident().value.clone());
             if let Some(row_alias) = &row_alias {
+                let mut relation = target.clone();
+                // `AS new(a, b)` names the inserted columns, in INSERT order
+                if let Some(names) = insert
+                    .insert_alias
+                    .as_ref()
+                    .and_then(|a| a.col_aliases.as_ref())
+                    .filter(|names| !names.is_empty())
+                {
+                    let names: Vec<String> = names.iter().map(|n| n.value.clone()).collect();
+                    let inserted = relation.columns.take().map(|columns| {
+                        if insert.columns.is_empty() {
+                            return columns;
+                        }
+                        insert
+                            .columns
+                            .iter()
+                            .filter_map(|c| {
+                                let name = &column_ident(c).value;
+                                columns
+                                    .iter()
+                                    .find(|col| col.name.eq_ignore_ascii_case(name))
+                                    .cloned()
+                            })
+                            .collect()
+                    });
+                    let mut renamed = Relation::rename_columns(inserted, &names);
+                    if let Some(columns) = &mut renamed {
+                        columns.truncate(names.len());
+                    }
+                    relation.columns = renamed;
+                    relation.former_columns.clear();
+                }
                 self.scope
                     .current()
                     .relations
-                    .insert(row_alias.clone(), target.clone());
+                    .insert(row_alias.clone(), relation);
             }
             self.on_insert(on, table_def, &table_name, target);
             // EXCLUDED / the row alias are only visible in the ON clause
@@ -444,7 +480,7 @@ impl<'a> Resolver<'a> {
                 relations.shift_remove(row_alias);
             }
         }
-        self.returning(insert.returning.as_deref())
+        self.returning(insert.returning.as_deref(), Some(&key))
     }
 
     /// Resolve the source query of INSERT ... SELECT, which can't see the target table
@@ -580,14 +616,33 @@ impl<'a> Resolver<'a> {
         self.diagnostics.push(diag);
     }
 
-    /// Resolve a RETURNING list against the statement's tables
-    fn returning(&mut self, returning: Option<&[SelectItem]>) -> Option<Vec<Column>> {
+    /// Resolve a RETURNING list against the statement's tables. `target` is the
+    /// scope key of the table the statement changes: PostgreSQL 18 names its row
+    /// before and after the change `old` and `new` there (a relation of the
+    /// statement with that name takes precedence).
+    fn returning(
+        &mut self,
+        returning: Option<&[SelectItem]>,
+        target: Option<&str>,
+    ) -> Option<Vec<Column>> {
         let items = returning?;
+        if self.dialect == SqlDialect::PostgreSQL {
+            let frame = self.scope.current();
+            if let Some(relation) =
+                target.and_then(|t| lookup_ignore_case(&frame.relations, t).cloned())
+            {
+                for name in ["old", "new"] {
+                    frame.row_aliases.insert(name.to_string(), relation.clone());
+                }
+            }
+        }
         let span = Span::with_location(0, 0, 0);
         for item in items {
             self.select_item(item, &span);
         }
-        self.projection_columns(items)
+        let columns = self.projection_columns(items);
+        self.scope.current().row_aliases.clear();
+        columns
     }
 
     /// Resolve an UPDATE statement in the current (statement) frame
@@ -690,7 +745,8 @@ impl<'a> Resolver<'a> {
             self.check_aggregates_in(where_expr, Clause::Where);
         }
 
-        self.returning(delete.returning.as_deref())
+        let target = tables.first().and_then(|t| relation_key(&t.relation));
+        self.returning(delete.returning.as_deref(), target.as_deref())
     }
 
     // ---------------------------------------------------------------------
@@ -1605,7 +1661,66 @@ impl<'a> Resolver<'a> {
                 let (key, _) = self.take_relations_since(start);
                 self.insert_pivot_relation(alias.as_ref(), key, None);
             }
+            TableFactor::JsonTable {
+                json_expr,
+                columns,
+                alias,
+                ..
+            } => {
+                // JSON_TABLE(doc, path COLUMNS (...)) sees the FROM items before it;
+                // its columns are the ones listed, with their types
+                self.expr(json_expr);
+                let mut listed = Vec::new();
+                self.json_table_columns(columns, &mut listed);
+                let (key, names) = match alias {
+                    Some(a) => (
+                        a.name.value.clone(),
+                        a.columns.iter().map(|c| c.name.value.clone()).collect(),
+                    ),
+                    None => ("json_table".to_string(), Vec::new()),
+                };
+                let columns = Relation::rename_columns(Some(listed), &names);
+                self.scope.current().relations.insert(
+                    key.clone(),
+                    Relation::new(RelationKind::Function, key, columns),
+                );
+            }
+            TableFactor::OpenJsonTable {
+                json_expr, alias, ..
+            } => {
+                self.expr(json_expr);
+                let key = alias
+                    .as_ref()
+                    .map_or_else(|| "openjson".to_string(), |a| a.name.value.clone());
+                self.scope.current().relations.insert(
+                    key.clone(),
+                    Relation::new(RelationKind::Function, key, None),
+                );
+            }
             _ => {}
+        }
+    }
+
+    /// The output columns of a `JSON_TABLE` column list, `NESTED PATH` columns
+    /// included
+    fn json_table_columns(
+        &self,
+        columns: &[sqlparser::ast::JsonTableColumn],
+        out: &mut Vec<Column>,
+    ) {
+        use sqlparser::ast::JsonTableColumn;
+        for column in columns {
+            match column {
+                JsonTableColumn::Named(named) => out.push(Column::new(
+                    named.name.value.clone(),
+                    ExpressionType::of_column(&SqlType::from_ast_in(&named.r#type, self.dialect)),
+                )),
+                JsonTableColumn::ForOrdinality(name) => out.push(Column::new(
+                    name.value.clone(),
+                    ExpressionType::Known(SqlType::Integer),
+                )),
+                JsonTableColumn::Nested(nested) => self.json_table_columns(&nested.columns, out),
+            }
         }
     }
 

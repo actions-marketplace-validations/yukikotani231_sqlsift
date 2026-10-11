@@ -1253,3 +1253,113 @@ fn mysql_and_sqlite_type_mismatches_are_implicit_conversions() {
         vec![DiagnosticKind::TypeMismatch]
     );
 }
+
+// #281: JSON_TABLE in FROM (PostgreSQL 17, MySQL 8)
+#[test]
+fn json_table_columns_are_the_listed_ones() {
+    let schema = "CREATE TABLE docs (id INTEGER PRIMARY KEY, body JSON);";
+    for dialect in [SqlDialect::PostgreSQL, SqlDialect::MySQL] {
+        for sql in [
+            "SELECT * FROM JSON_TABLE('[{\"a\":1}]', '$[*]' COLUMNS (a INT PATH '$.a')) AS jt",
+            "SELECT d.id, jt.a, jt.n FROM docs d, \
+             JSON_TABLE(d.body, '$[*]' COLUMNS (a INT PATH '$.a', n FOR ORDINALITY)) AS jt \
+             WHERE jt.n > 1",
+            "SELECT jt.b FROM docs d, JSON_TABLE(d.body, '$[*]' COLUMNS (a INT PATH '$.a', \
+             NESTED PATH '$.x[*]' COLUMNS (b TEXT PATH '$'))) AS jt",
+        ] {
+            let diagnostics = analyze(schema, dialect, sql);
+            assert!(diagnostics.is_empty(), "{dialect}: {sql}: {diagnostics:#?}");
+        }
+        let sql =
+            "SELECT jt.c FROM docs d, JSON_TABLE(d.body, '$[*]' COLUMNS (a INT PATH '$.a')) AS jt";
+        assert_eq!(
+            kinds(&analyze(schema, dialect, sql)),
+            vec![DiagnosticKind::ColumnNotFound],
+            "{dialect}"
+        );
+        let sql =
+            "SELECT jt.a FROM docs d, JSON_TABLE(d.nope, '$[*]' COLUMNS (a INT PATH '$')) AS jt";
+        assert_eq!(
+            kinds(&analyze(schema, dialect, sql)),
+            vec![DiagnosticKind::ColumnNotFound],
+            "{dialect}"
+        );
+    }
+}
+
+// #280: PostgreSQL 18 RETURNING old / new
+#[test]
+fn returning_old_and_new_rows() {
+    let schema = "CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL);
+                  CREATE TABLE posts (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT NOT NULL);";
+    for sql in [
+        "UPDATE users SET name = 'x' RETURNING old.name, new.name",
+        "UPDATE users u SET name = 'x' RETURNING old.id, new.*",
+        "DELETE FROM users RETURNING old.*",
+        "INSERT INTO users (name) VALUES ('a') RETURNING OLD.name, NEW.name",
+        // A relation of the statement named `old` takes precedence
+        "UPDATE users SET name = 'x' FROM posts old WHERE old.user_id = users.id RETURNING old.title",
+    ] {
+        let diagnostics = analyze(schema, SqlDialect::PostgreSQL, sql);
+        assert!(diagnostics.is_empty(), "{sql}: {diagnostics:#?}");
+    }
+    for (sql, kind) in [
+        (
+            "UPDATE users SET name = 'x' RETURNING old.nope",
+            DiagnosticKind::ColumnNotFound,
+        ),
+        ("SELECT old.name FROM users", DiagnosticKind::TableNotFound),
+    ] {
+        assert_eq!(
+            kinds(&analyze(schema, SqlDialect::PostgreSQL, sql)),
+            vec![kind],
+            "{sql}"
+        );
+    }
+    // Only PostgreSQL has them
+    assert_eq!(
+        kinds(&analyze(
+            schema,
+            SqlDialect::SQLite,
+            "UPDATE users SET name = 'x' RETURNING old.name"
+        )),
+        vec![DiagnosticKind::TableNotFound]
+    );
+}
+
+// #282: MySQL 8.0.19 INSERT ... AS new(a, b) ON DUPLICATE KEY UPDATE
+#[test]
+fn mysql_insert_row_alias_column_aliases() {
+    let schema = "CREATE TABLE counters (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(20) NOT NULL UNIQUE,
+        hits INT NOT NULL DEFAULT 0,
+        note TEXT
+    );";
+    for sql in [
+        "INSERT INTO counters (name, hits) VALUES ('a', 1) AS new(n, h) \
+         ON DUPLICATE KEY UPDATE hits = hits + h, note = n",
+        "INSERT INTO counters (name, hits) VALUES ('a', 1) AS new(n, h) \
+         ON DUPLICATE KEY UPDATE hits = counters.hits + new.h",
+        "INSERT INTO counters VALUES (1, 'a', 1, NULL) AS new(i, n, h, t) \
+         ON DUPLICATE KEY UPDATE hits = h, note = t",
+        "INSERT INTO counters (name, hits) VALUES ('a', 1) AS new \
+         ON DUPLICATE KEY UPDATE hits = new.hits, note = new.note",
+    ] {
+        let diagnostics = analyze(schema, SqlDialect::MySQL, sql);
+        assert!(diagnostics.is_empty(), "{sql}: {diagnostics:#?}");
+    }
+    // The aliases replace the column names
+    for sql in [
+        "INSERT INTO counters (name, hits) VALUES ('a', 1) AS new(n, h) \
+         ON DUPLICATE KEY UPDATE hits = new.hits",
+        "INSERT INTO counters (name, hits) VALUES ('a', 1) AS new(n, h) \
+         ON DUPLICATE KEY UPDATE hits = x",
+    ] {
+        assert_eq!(
+            kinds(&analyze(schema, SqlDialect::MySQL, sql)),
+            vec![DiagnosticKind::ColumnNotFound],
+            "{sql}"
+        );
+    }
+}
