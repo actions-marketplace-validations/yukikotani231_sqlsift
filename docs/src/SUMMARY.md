@@ -44,6 +44,16 @@
   - [E0014 unmatched-conflict-target](rules/E0014.md)
   - [E0015 distinct-order-by](rules/E0015.md)
   - [E0016 grouping-error](rules/E0016.md)
+  - [E0017 value-out-of-range](rules/E0017.md)
+  - [E0018 null-comparison](rules/E0018.md)
+  - [E0019 not-in-with-nulls](rules/E0019.md)
+  - [E0020 outer-column-in-subquery](rules/E0020.md)
+  - [E0021 missing-join-condition](rules/E0021.md)
+  - [E0022 constant-condition](rules/E0022.md)
+  - [E0023 outer-join-filtered](rules/E0023.md)
+  - [E0024 unfiltered-write](rules/E0024.md)
+  - [E0025 insert-without-columns](rules/E0025.md)
+  - [E0026 select-star](rules/E0026.md)
   - [E1000 parse-error](rules/E1000.md)
 
 ---

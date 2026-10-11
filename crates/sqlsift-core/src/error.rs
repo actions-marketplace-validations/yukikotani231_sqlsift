@@ -182,6 +182,26 @@ pub enum DiagnosticKind {
     DistinctOrderBy,
     /// E0016: Column neither grouped nor aggregated in an aggregate query
     GroupingError,
+    /// E0017: A literal the target column's type can't hold
+    ValueOutOfRange,
+    /// E0018: Comparison with NULL using `=`, `<>`, ... (never true)
+    NullComparison,
+    /// E0019: NOT IN over a subquery whose column may be NULL
+    NotInWithNulls,
+    /// E0020: Column of an IN subquery's select list that is the outer query's
+    OuterColumnInSubquery,
+    /// E0021: Comma-separated FROM tables with no condition linking them
+    MissingJoinCondition,
+    /// E0022: A condition that is always or never true from the schema
+    ConstantCondition,
+    /// E0023: WHERE condition that turns an outer join into an inner join
+    OuterJoinFiltered,
+    /// E0024: UPDATE or DELETE without WHERE
+    UnfilteredWrite,
+    /// E0025: INSERT without a column list
+    InsertWithoutColumns,
+    /// E0026: SELECT * in a statement's result
+    SelectStar,
     /// Parse error
     ParseError,
 }
