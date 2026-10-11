@@ -1600,6 +1600,7 @@ impl<'a> Resolver<'a> {
                     }
                     (args, _) => self.function_args(args),
                 }
+                self.check_function_signature(func);
                 // ORDER BY inside aggregate arguments: array_agg(x ORDER BY y)
                 if let sqlparser::ast::FunctionArguments::List(list) = &func.args {
                     for clause in &list.clauses {
@@ -1714,10 +1715,17 @@ impl<'a> Resolver<'a> {
                 self.expr(expr);
                 self.expr(r#in);
             }
-            Expr::Like { expr, pattern, .. }
-            | Expr::ILike { expr, pattern, .. }
-            | Expr::SimilarTo { expr, pattern, .. }
-            | Expr::RLike { expr, pattern, .. } => {
+            Expr::Like { expr, pattern, .. } => {
+                self.expr(expr);
+                self.expr(pattern);
+                self.check_like_operand(expr, "LIKE");
+            }
+            Expr::ILike { expr, pattern, .. } => {
+                self.expr(expr);
+                self.expr(pattern);
+                self.check_like_operand(expr, "ILIKE");
+            }
+            Expr::SimilarTo { expr, pattern, .. } | Expr::RLike { expr, pattern, .. } => {
                 self.expr(expr);
                 self.expr(pattern);
             }
