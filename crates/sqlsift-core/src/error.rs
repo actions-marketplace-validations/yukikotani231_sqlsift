@@ -215,6 +215,8 @@ pub enum DiagnosticKind {
     JoinFanOut,
     /// E0032: Division of integer columns truncates toward zero
     IntegerDivision,
+    /// E0033: Comparing or assigning timestamp with timestamptz depends on session TimeZone
+    TimestampTimezoneMismatch,
     /// Parse error
     ParseError,
 }
