@@ -387,6 +387,13 @@ pub const RULES: &[Rule] = &[
         summary: "CASE over an enum column misses some labels and has no ELSE",
     },
     Rule {
+        kind: DiagnosticKind::DuplicateInsertValue,
+        code: "E0035",
+        name: "duplicate-insert-value",
+        category: RuleCategory::Correctness,
+        summary: "Duplicate primary key or unique values in an INSERT VALUES list",
+    },
+    Rule {
         kind: DiagnosticKind::ParseError,
         code: "E1000",
         name: "parse-error",

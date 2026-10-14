@@ -41,6 +41,7 @@ E0031  join-fan-out              suspicious   warn     Aggregate over rows that 
 E0032  integer-division          pedantic     off      Division of integer columns truncates toward zero
 E0033  timestamp-timezone-mismatch suspicious warn     Comparing or assigning timestamp with timestamptz depends on session TimeZone
 E0034  case-enum-missing-labels  pedantic     off      CASE over an enum column misses some labels and has no ELSE
+E0035  duplicate-insert-value    correctness  error    Duplicate primary key or unique values in an INSERT VALUES list
 E1000  parse-error               correctness  error    SQL could not be parsed
 ```
 
