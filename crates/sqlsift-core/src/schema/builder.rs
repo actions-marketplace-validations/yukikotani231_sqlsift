@@ -7,7 +7,7 @@ use sqlparser::ast::{
     TableConstraint, TriggerEvent, TriggerPeriod, Use, UserDefinedTypeRepresentation, Value,
     ValueWithSpan,
 };
-use sqlparser::parser::{Parser, ParserError};
+use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
 
 use crate::analyzer;
@@ -228,7 +228,7 @@ impl SchemaBuilder {
         let search_path = self.catalog.search_path.clone();
 
         // Try parsing the entire SQL first (fast path)
-        match Parser::parse_sql(dialect.as_ref(), sql) {
+        match crate::stack::parse_sql(dialect.as_ref(), sql) {
             Ok(statements) => {
                 for stmt in statements {
                     self.process_statement(&stmt);
@@ -257,13 +257,15 @@ impl SchemaBuilder {
             }
 
             // Parse the untrimmed text so parser locations are relative to `raw_stmt`
-            let parsed = Parser::parse_sql(dialect.as_ref(), raw_stmt).or_else(|err| {
+            let parsed = crate::stack::parse_sql(dialect.as_ref(), raw_stmt).or_else(|err| {
                 // BigQuery: retry with nested type parameter lists closed by `> >`
                 // (sqlparser rejects some `>>`); only locations past them shift
                 match self.dialect {
                     SqlDialect::BigQuery => {
                         crate::analyzer::bigquery::split_closing_angle_brackets(raw_stmt)
-                            .and_then(|split| Parser::parse_sql(dialect.as_ref(), &split).ok())
+                            .and_then(|split| {
+                                crate::stack::parse_sql(dialect.as_ref(), &split).ok()
+                            })
                             .ok_or(err)
                     }
                     _ => Err(err),
@@ -566,7 +568,7 @@ impl SchemaBuilder {
             return false;
         };
         let dialect = self.dialect.parser_dialect();
-        let Ok(stmts) = Parser::parse_sql(dialect.as_ref(), &masked) else {
+        let Ok(stmts) = crate::stack::parse_sql(dialect.as_ref(), &masked) else {
             return false;
         };
         for stmt in stmts {
@@ -872,6 +874,7 @@ impl SchemaBuilder {
                 table.unique_constraints.push(UniqueConstraintDef {
                     name: index_name,
                     columns,
+                    deferrable: false,
                 });
             }
             _ => table.unknown_unique_keys = true,
@@ -949,6 +952,20 @@ impl SchemaBuilder {
             return;
         }
         let mut table = TableDef::new(name.clone());
+        table.strict = create.strict
+            || match &create.table_options {
+                sqlparser::ast::CreateTableOptions::Plain(opts)
+                | sqlparser::ast::CreateTableOptions::With(opts)
+                | sqlparser::ast::CreateTableOptions::Options(opts) => {
+                    opts.iter().any(|opt| match opt {
+                        sqlparser::ast::SqlOption::Ident(ident) => {
+                            ident.value.eq_ignore_ascii_case("STRICT")
+                        }
+                        _ => false,
+                    })
+                }
+                _ => false,
+            };
 
         // MySQL `CREATE TABLE t2 LIKE t`: copy the definition
         let like = create.like.as_ref().map(|like| match like {
@@ -968,6 +985,7 @@ impl SchemaBuilder {
                     table
                         .check_constraints
                         .clone_from(&source_table.check_constraints);
+                    table.strict = source_table.strict;
                 }
                 None => self.warn_like_source_missing(&name, &source),
             }
@@ -1431,9 +1449,11 @@ impl SchemaBuilder {
     fn process_table_constraint(&mut self, table: &mut TableDef, constraint: &TableConstraint) {
         match constraint {
             TableConstraint::PrimaryKey(pk) => {
+                let deferrable = is_deferrable(pk.characteristics.as_ref());
                 let pk = PrimaryKeyDef {
                     name: pk.name.as_ref().map(|n| n.value.clone()),
                     columns: pk.columns.iter().map(index_column_name).collect(),
+                    deferrable,
                 };
                 // Mark columns as primary key
                 for col_name in &pk.columns {
@@ -1459,9 +1479,11 @@ impl SchemaBuilder {
                 table.foreign_keys.push(fk);
             }
             TableConstraint::Unique(unique) => {
+                let deferrable = is_deferrable(unique.characteristics.as_ref());
                 let unique = UniqueConstraintDef {
                     name: unique.name.as_ref().map(|n| n.value.clone()),
                     columns: unique.columns.iter().map(index_column_name).collect(),
+                    deferrable,
                 };
                 table.unique_constraints.push(unique);
             }
@@ -1498,6 +1520,13 @@ impl Default for SchemaBuilder {
     }
 }
 
+fn is_deferrable(characteristics: Option<&sqlparser::ast::ConstraintCharacteristics>) -> bool {
+    let Some(c) = characteristics else {
+        return false;
+    };
+    c.deferrable == Some(true) || c.initially == Some(sqlparser::ast::DeferrableInitial::Deferred)
+}
+
 /// Build a column definition from its name, type and options. Table-level
 /// constraints declared inline (PRIMARY KEY, UNIQUE, REFERENCES, CHECK) are
 /// collected into the returned `TableDef`, to be merged into the owning table.
@@ -1518,18 +1547,22 @@ fn build_column(
             ColumnOption::Null => col.nullable = true,
             ColumnOption::NotNull => col.nullable = false,
             ColumnOption::Default(expr) => col.default = Some(expr_to_default(expr)),
-            ColumnOption::PrimaryKey(_) => {
+            ColumnOption::PrimaryKey(pk) => {
                 col.is_primary_key = true;
                 col.nullable = false;
+                let deferrable = is_deferrable(pk.characteristics.as_ref());
                 constraints.primary_key = Some(PrimaryKeyDef {
                     name: constraint_name,
                     columns: vec![col_name.to_string()],
+                    deferrable,
                 });
             }
-            ColumnOption::Unique(_) => {
+            ColumnOption::Unique(unique) => {
+                let deferrable = is_deferrable(unique.characteristics.as_ref());
                 constraints.unique_constraints.push(UniqueConstraintDef {
                     name: constraint_name,
                     columns: vec![col_name.to_string()],
+                    deferrable,
                 });
             }
             ColumnOption::ForeignKey(fk) => {

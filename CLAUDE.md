@@ -64,7 +64,7 @@ sqlsift/
 4. **Resolver** (`analyzer/resolver.rs`): Walks each statement once: resolves table, view, CTE and column references and reports each query block's output columns with their types; with `Analyzer::with_references` it also records the uses of catalog tables, views and columns (`analyzer::Reference`, reads and writes, for `impact --references` and `sqlsift unused`)
 5. **Scope** (`analyzer/scope.rs`): Stack of query blocks (relations, CTEs, USING columns) shared by name resolution and type inference; encodes SQL visibility rules (correlation, non-LATERAL FROM subqueries, CTE scoping)
 6. **Type checks** (`analyzer/type_check.rs`): Expression type inference and E0003/E0004/E0007 checks, implemented on `Resolver`
-7. **Structural checks** (`analyzer/structure.rs`): E0009-E0015 (duplicate names and target columns, positions, misplaced aggregates, generated columns, ON CONFLICT targets, DISTINCT ORDER BY) and the E0005 checks of column alias lists and subquery shapes; `analyzer/grouping.rs` has E0016 and `analyzer/ranges.rs` E0017, implemented on `Resolver`
+7. **Structural checks** (`analyzer/structure.rs`): E0009-E0015 (duplicate names and target columns, positions, misplaced aggregates, generated columns, ON CONFLICT targets, DISTINCT ORDER BY), E0035 (duplicate primary key or unique values in INSERT VALUES list) and the E0005 checks of column alias lists and subquery shapes; `analyzer/grouping.rs` has E0016 and `analyzer/ranges.rs` E0017, implemented on `Resolver`
 8. **SqlType** (`types/mod.rs`): Internal SQL type representation with compatibility checking
 9. **Config** (`config.rs`): Configuration file loader with hierarchical merging (file < CLI args)
 10. **LSP Backend** (`sqlsift-lsp/server.rs`): tower-lsp LanguageServer implementation with real-time diagnostics
@@ -267,6 +267,10 @@ Dependencies must have a license allowed by `deny.toml` (CI job "Licenses"). Aft
 - **E0028** (restriction, off by default): LIMIT / OFFSET / FETCH FIRST without ORDER BY, in subqueries and CTEs too, except the query of an EXISTS (`analyzer/restriction.rs`)
 - **E0030** (suspicious, warning): JOIN ... ON pairing a foreign key column with another key column instead of the column the foreign key links (`orders o JOIN users u ON u.id = o.id` for `orders.user_id REFERENCES users(id)`; `analyzer/suspicious.rs`)
 - **E0031** (suspicious, warning): sum/avg/count over a table joined one-to-many next to another one-to-many join of the same parent (double counting; `analyzer/fan_out.rs`)
+- **E0032** (pedantic, off by default): division of integer columns truncates toward zero (`qty / items`; `analyzer/type_check.rs`)
+- **E0033** (suspicious, warning): comparing or assigning `timestamp` (without time zone) with `timestamptz` (with time zone) depends on session TimeZone setting in PostgreSQL and Redshift (`analyzer/type_check.rs`)
+- **E0034** (pedantic, off by default): CASE over an enum column misses some labels and has no ELSE (`analyzer/pedantic.rs`)
+- **E0035**: Duplicate primary key or unique values in INSERT VALUES list (`analyzer/structure.rs`)
 - **E1000**: Generic parse error
 
 ## Release Process
