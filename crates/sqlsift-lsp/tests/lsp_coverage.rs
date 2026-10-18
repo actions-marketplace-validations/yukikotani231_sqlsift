@@ -366,6 +366,10 @@ fn did_open_publishes_diagnostics_with_zero_indexed_range() {
     assert_eq!(diags.len(), 1, "{diags:#?}");
     let d = &diags[0];
     assert_eq!(d["code"], "E0002");
+    assert_eq!(
+        d["codeDescription"]["href"],
+        "https://sqlsift.dev/docs/rules/E0002.html"
+    );
     assert_eq!(d["source"], "sqlsift");
     assert_eq!(d["severity"], 1);
     assert_eq!(d["range"]["start"], json!({"line": 3, "character": 2}));
