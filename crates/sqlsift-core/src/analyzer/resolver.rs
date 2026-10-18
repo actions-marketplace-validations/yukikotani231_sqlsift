@@ -169,7 +169,11 @@ impl<'a> Resolver<'a> {
     /// Resolve a statement. Returns its output columns (the result of a query, or
     /// the RETURNING list of INSERT/UPDATE/DELETE) if they can be determined.
     pub(super) fn statement(&mut self, stmt: &Statement) -> Option<Vec<Column>> {
-        if self.restrictions {
+        // The statement wrapped by EXPLAIN / PREPARE is checked when it is resolved
+        // below; checking the wrapper too would report its E0028 twice
+        if self.restrictions
+            && !matches!(stmt, Statement::Explain { .. } | Statement::Prepare { .. })
+        {
             self.check_restrictions(stmt);
         }
         match stmt {
@@ -215,6 +219,18 @@ impl<'a> Resolver<'a> {
             }
             Statement::CreateView(view) => {
                 self.query(&view.query, false);
+                None
+            }
+            Statement::Explain { statement, .. } | Statement::Prepare { statement, .. } => {
+                self.statement(statement);
+                None
+            }
+            Statement::Declare { stmts } => {
+                for declare in stmts {
+                    if let Some(query) = &declare.for_query {
+                        self.query(query, false);
+                    }
+                }
                 None
             }
             _ => None,
