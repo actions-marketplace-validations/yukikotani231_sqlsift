@@ -43,6 +43,7 @@ E0033  timestamp-timezone-mismatch suspicious warn     Comparing or assigning ti
 E0034  case-enum-missing-labels  pedantic     off      CASE over an enum column misses some labels and has no ELSE
 E0035  duplicate-insert-value    correctness  error    Duplicate primary key or unique values in an INSERT VALUES list
 E0036  illegal-mix-of-collations correctness  error    Comparison or expression combines incompatible collations in MySQL
+E0037  check-constraint-violation correctness error    Literal assigned to column violates a CHECK constraint
 E1000  parse-error               correctness  error    SQL could not be parsed
 ```
 
