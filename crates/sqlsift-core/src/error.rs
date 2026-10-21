@@ -223,6 +223,8 @@ pub enum DiagnosticKind {
     DuplicateInsertValue,
     /// E0036: Comparison or set operation combines incompatible collations in MySQL
     IllegalMixOfCollations,
+    /// E0037: Literal that violates a CHECK constraint in INSERT VALUES or UPDATE SET
+    CheckConstraintViolation,
     /// Parse error
     ParseError,
 }

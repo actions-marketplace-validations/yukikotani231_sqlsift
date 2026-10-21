@@ -630,6 +630,39 @@ impl Catalog {
             })
             .collect()
     }
+
+    /// `name` and any tables that are (transitively) `PARTITION OF` it
+    pub fn table_and_partitions(&self, name: &QualifiedName) -> Vec<QualifiedName> {
+        let mut targets = vec![name.clone()];
+        let mut i = 0;
+        while i < targets.len() {
+            let Some(parent_table) = self.get_table(&targets[i]) else {
+                i += 1;
+                continue;
+            };
+            let children: Vec<QualifiedName> = self
+                .schemas
+                .iter()
+                .flat_map(|(schema_name, schema)| {
+                    schema.tables.values().filter_map(move |t| {
+                        let parent_ref = t.partition_of.as_ref()?;
+                        let resolved = self.get_table(parent_ref)?;
+                        std::ptr::eq(resolved, parent_table).then(|| QualifiedName {
+                            schema: Some(schema_name.clone()),
+                            name: t.name.name.clone(),
+                        })
+                    })
+                })
+                .collect();
+            for child in children {
+                if !targets.contains(&child) {
+                    targets.push(child);
+                }
+            }
+            i += 1;
+        }
+        targets
+    }
 }
 
 /// The parts of a dotted name, with each backtick-quoted identifier that contains
@@ -755,6 +788,9 @@ pub struct TableDef {
     /// Whether this table was created with STRICT typing (SQLite STRICT tables)
     #[serde(default)]
     pub strict: bool,
+    /// Parent table if this table was created with `PARTITION OF parent`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_of: Option<QualifiedName>,
 }
 
 /// A column that ALTER TABLE renamed or dropped
@@ -786,6 +822,7 @@ impl TableDef {
             character_set: None,
             collation: None,
             strict: false,
+            partition_of: None,
         }
     }
 
@@ -916,6 +953,9 @@ pub struct ColumnDef {
     /// (see [`Catalog::is_case_sensitive_column`])
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub case_sensitive: bool,
+    /// Whether the column has an explicit `COLLATE` clause
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collated: bool,
     /// Character set for text columns (e.g. `CHARACTER SET utf8mb4`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character_set: Option<String>,
@@ -936,6 +976,7 @@ impl ColumnDef {
             auto_increment: false,
             generated: false,
             case_sensitive: false,
+            collated: false,
             character_set: None,
             collation: None,
         }
@@ -1010,11 +1051,24 @@ pub struct UniqueConstraintDef {
     pub deferrable: bool,
 }
 
+const fn default_true() -> bool {
+    true
+}
+
 /// CHECK constraint
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckConstraintDef {
     pub name: Option<String>,
     pub expression: String,
+    #[serde(default = "default_true")]
+    pub enforced: bool,
+    /// Column this CHECK constraint was declared inline on (`None` for table-level)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    /// Database-generated constraint name when `name` is `None` (e.g., `t_x_check`,
+    /// `t_check`, `t_chk_1`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_name: Option<String>,
 }
 
 /// Enum type definition (CREATE TYPE ... AS ENUM)

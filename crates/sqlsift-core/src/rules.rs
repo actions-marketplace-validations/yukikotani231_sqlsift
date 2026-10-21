@@ -401,6 +401,13 @@ pub const RULES: &[Rule] = &[
         summary: "Comparison or set operation combines incompatible collations in MySQL",
     },
     Rule {
+        kind: DiagnosticKind::CheckConstraintViolation,
+        code: "E0037",
+        name: "check-constraint-violation",
+        category: RuleCategory::Correctness,
+        summary: "Literal assigned to column violates a CHECK constraint",
+    },
+    Rule {
         kind: DiagnosticKind::ParseError,
         code: "E1000",
         name: "parse-error",
